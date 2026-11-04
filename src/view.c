@@ -992,7 +992,11 @@ struct view *view_create(uint64_t sid)
     memset(view->root, 0, sizeof(struct window_node));
 
     view->sid = sid;
-    view->uuid = SLSSpaceCopyName(g_connection, sid);
+    if (virtual_space_is_virtual(sid)) {
+        view->uuid = CFStringCreateWithFormat(NULL, NULL, CFSTR("virtual-%llu"), sid - VIRTUAL_SPACE_SID_BASE);
+    } else {
+        view->uuid = SLSSpaceCopyName(g_connection, sid);
+    }
 
     view_set_flag(view, VIEW_ENABLE_PADDING);
     view_set_flag(view, VIEW_ENABLE_GAP);

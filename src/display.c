@@ -71,9 +71,12 @@ void display_serialize(FILE *rsp, uint32_t did, uint64_t flags)
     if (flags & DISPLAY_PROPERTY_SPACES) {
         if (did_output) fprintf(rsp, ",\n");
 
-        int count;
-        uint64_t *space_list = display_space_list(did, &count);
+        int count = 0;
+        uint64_t *space_list = g_virtual_space_manager.enabled ? NULL : display_space_list(did, &count);
 
+        if (g_virtual_space_manager.enabled) {
+            virtual_space_serialize_display_spaces(rsp, did);
+        } else {
         fprintf(rsp, "\t\"spaces\":[");
         if (space_list) {
             int first_mci = space_manager_mission_control_index(space_list[0]);
@@ -86,6 +89,7 @@ void display_serialize(FILE *rsp, uint32_t did, uint64_t flags)
             }
         }
         fprintf(rsp, "]");
+        }
         did_output = true;
     }
 
@@ -176,7 +180,7 @@ CGPoint display_center(uint32_t did)
     return (CGPoint) { bounds.origin.x + bounds.size.width/2, bounds.origin.y + bounds.size.height/2 };
 }
 
-inline uint64_t display_space_id(uint32_t did)
+uint64_t display_space_id_real(uint32_t did)
 {
     CFStringRef uuid = display_uuid(did);
     if (!uuid) return 0;
@@ -187,7 +191,25 @@ inline uint64_t display_space_id(uint32_t did)
     return sid;
 }
 
+uint64_t display_space_id(uint32_t did)
+{
+    uint64_t sid = display_space_id_real(did);
+    if (g_virtual_space_manager.enabled) return virtual_space_display_space(did, sid);
+    return sid;
+}
+
 int display_space_count(uint32_t did)
+{
+    if (g_virtual_space_manager.enabled) {
+        int count = 0;
+        virtual_space_list_for_display(did, &count);
+        return count;
+    }
+
+    return display_space_count_real(did);
+}
+
+int display_space_count_real(uint32_t did)
 {
     int space_count = 0;
 
@@ -216,6 +238,12 @@ out:
 }
 
 uint64_t *display_space_list(uint32_t did, int *count)
+{
+    if (g_virtual_space_manager.enabled) return virtual_space_list_for_display(did, count);
+    return display_space_list_real(did, count);
+}
+
+uint64_t *display_space_list_real(uint32_t did, int *count)
 {
     uint64_t *space_list = NULL;
 

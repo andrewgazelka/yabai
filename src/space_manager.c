@@ -69,6 +69,8 @@ bool space_manager_query_spaces_for_displays(FILE *rsp, uint64_t flags)
 {
     TIME_FUNCTION;
 
+    if (g_virtual_space_manager.enabled) return virtual_space_query_spaces(rsp, flags);
+
     int display_count;
     uint32_t *display_list = display_manager_active_display_list(&display_count);
     if (!display_list) return false;
@@ -490,6 +492,8 @@ void space_manager_toggle_window_split(struct space_manager *sm, struct window *
 
 int space_manager_mission_control_index(uint64_t sid)
 {
+    if (virtual_space_is_virtual(sid)) return virtual_space_index(sid);
+
     uint64_t result = 0;
     int desktop_cnt = 1;
 
@@ -520,6 +524,8 @@ out:
 
 uint64_t space_manager_mission_control_space(int desktop_id)
 {
+    if (g_virtual_space_manager.enabled) return virtual_space_at_index(desktop_id);
+
     uint64_t result = 0;
     int desktop_cnt = 1;
 
@@ -556,6 +562,8 @@ uint64_t space_manager_cursor_space(void)
 
 uint64_t space_manager_prev_space(uint64_t sid)
 {
+    if (g_virtual_space_manager.enabled) return virtual_space_prev(sid);
+
     uint64_t p_sid = 0;
     uint64_t n_sid = 0;
 
@@ -585,6 +593,8 @@ out:
 
 uint64_t space_manager_next_space(uint64_t sid)
 {
+    if (g_virtual_space_manager.enabled) return virtual_space_next(sid);
+
     uint64_t n_sid = 0;
     bool found_sid = false;
 
@@ -614,6 +624,8 @@ out:
 
 uint64_t space_manager_first_space(void)
 {
+    if (g_virtual_space_manager.enabled) return virtual_space_first();
+
     uint64_t sid = 0;
 
     CFArrayRef display_spaces_ref = SLSCopyManagedDisplaySpaces(g_connection);
@@ -632,6 +644,8 @@ uint64_t space_manager_first_space(void)
 
 uint64_t space_manager_last_space(void)
 {
+    if (g_virtual_space_manager.enabled) return virtual_space_last();
+
     uint64_t sid = 0;
 
     CFArrayRef display_spaces_ref = SLSCopyManagedDisplaySpaces(g_connection);
@@ -664,6 +678,22 @@ uint64_t space_manager_active_space(void)
 
 void space_manager_move_window_list_to_space(uint64_t sid, uint32_t *window_list, int window_count)
 {
+    if (g_virtual_space_manager.enabled) {
+        uint64_t vsid = virtual_space_translate(sid);
+        if (!virtual_space_is_virtual(vsid)) return;
+
+        for (int i = 0; i < window_count; ++i) {
+            struct window *window = window_manager_find_window(&g_window_manager, window_list[i]);
+            if (window) virtual_space_move_window(window, vsid);
+        }
+        return;
+    }
+
+    space_manager_move_window_list_to_space_real(sid, window_list, window_count);
+}
+
+void space_manager_move_window_list_to_space_real(uint64_t sid, uint32_t *window_list, int window_count)
+{
     if (SLSPerformAsynchronousBridgedWindowManagementOperation) {
         CFArrayRef window_list_ref = cfarray_of_cfnumbers(window_list, sizeof(uint32_t), window_count, kCFNumberSInt32Type);
         Class cls = objc_getClass("SLSBridgedMoveWindowsToManagedSpaceOperation");
@@ -685,6 +715,12 @@ void space_manager_move_window_list_to_space(uint64_t sid, uint32_t *window_list
 
 void space_manager_move_window_to_space(uint64_t sid, struct window *window)
 {
+    if (g_virtual_space_manager.enabled) {
+        uint64_t vsid = virtual_space_translate(sid);
+        if (virtual_space_is_virtual(vsid)) virtual_space_move_window(window, vsid);
+        return;
+    }
+
     if (SLSPerformAsynchronousBridgedWindowManagementOperation) {
         CFArrayRef window_list_ref = cfarray_of_cfnumbers(&window->id, sizeof(uint32_t), 1, kCFNumberSInt32Type);
         Class cls = objc_getClass("SLSBridgedMoveWindowsToManagedSpaceOperation");
@@ -800,6 +836,8 @@ static enum space_op_error space_manager_swap_space_with_space_on_display(uint32
 
 enum space_op_error space_manager_swap_space_with_space(uint64_t acting_sid, uint64_t selector_sid)
 {
+    if (g_virtual_space_manager.enabled) return SPACE_OP_ERROR_INVALID_TYPE;
+
     bool is_in_mc = mission_control_is_active();
     if (is_in_mc) return SPACE_OP_ERROR_IN_MISSION_CONTROL;
 
@@ -850,6 +888,8 @@ enum space_op_error space_manager_swap_space_with_space(uint64_t acting_sid, uin
 
 enum space_op_error space_manager_move_space_to_space(uint64_t acting_sid, uint64_t selector_sid)
 {
+    if (g_virtual_space_manager.enabled) return SPACE_OP_ERROR_INVALID_TYPE;
+
     bool is_in_mc = mission_control_is_active();
     if (is_in_mc) return SPACE_OP_ERROR_IN_MISSION_CONTROL;
 
@@ -890,6 +930,8 @@ enum space_op_error space_manager_move_space_to_space(uint64_t acting_sid, uint6
 
 enum space_op_error space_manager_move_space_to_display(struct space_manager *sm, uint64_t sid, uint32_t did)
 {
+    if (g_virtual_space_manager.enabled) return SPACE_OP_ERROR_INVALID_TYPE;
+
     bool is_in_mc = mission_control_is_active();
     if (is_in_mc) return SPACE_OP_ERROR_IN_MISSION_CONTROL;
     if (!sid)     return SPACE_OP_ERROR_MISSING_SRC;
@@ -984,6 +1026,8 @@ bool space_manager_focus_space_using_gesture(uint32_t new_did, uint64_t new_sid)
 
 enum space_op_error space_manager_focus_space(uint64_t sid)
 {
+    if (virtual_space_is_virtual(sid)) return virtual_space_focus(sid);
+
     bool is_in_mc = mission_control_is_active();
     if (is_in_mc) return SPACE_OP_ERROR_IN_MISSION_CONTROL;
 
@@ -1010,6 +1054,8 @@ enum space_op_error space_manager_focus_space(uint64_t sid)
 
 enum space_op_error space_manager_switch_space(uint64_t sid)
 {
+    if (virtual_space_is_virtual(sid)) return virtual_space_focus(sid);
+
     bool is_in_mc = mission_control_is_active();
     if (is_in_mc) return SPACE_OP_ERROR_IN_MISSION_CONTROL;
 
@@ -1036,6 +1082,12 @@ enum space_op_error space_manager_switch_space(uint64_t sid)
 
 enum space_op_error space_manager_destroy_space(uint64_t sid)
 {
+    if (g_virtual_space_manager.enabled) {
+        if (!sid) return SPACE_OP_ERROR_MISSING_SRC;
+        if (!virtual_space_is_virtual(sid)) return SPACE_OP_ERROR_INVALID_TYPE;
+        return virtual_space_destroy(sid);
+    }
+
     bool is_in_mc = mission_control_is_active();
     if (is_in_mc) return SPACE_OP_ERROR_IN_MISSION_CONTROL;
 
@@ -1061,6 +1113,11 @@ enum space_op_error space_manager_destroy_space(uint64_t sid)
 
 enum space_op_error space_manager_add_space(uint64_t sid)
 {
+    //
+    // NOTE: With virtual spaces on, yabai never creates a native space.
+    //
+    if (g_virtual_space_manager.enabled) return virtual_space_create(sid ? space_display_id(sid) : 0);
+
     bool is_in_mc = mission_control_is_active();
     if (is_in_mc) return SPACE_OP_ERROR_IN_MISSION_CONTROL;
     if (!sid)     return SPACE_OP_ERROR_MISSING_SRC;
@@ -1073,6 +1130,8 @@ enum space_op_error space_manager_add_space(uint64_t sid)
 
 void space_manager_assign_process_to_space(pid_t pid, uint64_t sid)
 {
+    if (virtual_space_is_virtual(sid)) return;
+
     SLSProcessAssignToSpace(g_connection, pid, sid);
 }
 
@@ -1149,6 +1208,11 @@ bool space_manager_refresh_application_windows(struct space_manager *sm)
 
 void space_manager_handle_display_add(struct space_manager *sm, uint32_t did)
 {
+    if (g_virtual_space_manager.enabled) {
+        virtual_space_displays_changed();
+        return;
+    }
+
     int space_count;
     uint64_t *space_list = display_space_list(did, &space_count);
     if (!space_list) return;

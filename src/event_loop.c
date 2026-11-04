@@ -35,6 +35,11 @@ static void update_window_notifications(void)
 
 static void window_did_receive_focus(struct window_manager *wm, struct mouse_state *ms, struct window *window)
 {
+    if (g_virtual_space_manager.enabled) {
+        if (virtual_space_should_ignore_focus(window)) return;
+        virtual_space_window_did_receive_focus(window);
+    }
+
     struct window *focused_window = window_manager_find_window(wm, wm->focused_window_id);
     if (focused_window && focused_window != window && window_space(focused_window->id) == window_space(window->id)) {
         window_manager_set_window_opacity(wm, focused_window, g_window_manager.normal_window_opacity);
@@ -356,7 +361,7 @@ static EVENT_HANDLER(APPLICATION_FRONT_SWITCHED)
         return;
     }
 
-    if (g_space_manager.skip_window_focus_animation) {
+    if (g_space_manager.skip_window_focus_animation && !g_virtual_space_manager.enabled) {
         uint64_t psn_sid = process_manager_active_space_for_psn(application->connection);
 
         uint64_t last_cmd_tab_time = __atomic_load_n(&__last_cmd_tab_time, __ATOMIC_RELAXED);
@@ -430,6 +435,7 @@ static EVENT_HANDLER(APPLICATION_VISIBLE)
 
     debug("%s: %s\n", __FUNCTION__, application->name);
     application->is_hidden = false;
+    virtual_space_application_did_unhide(application);
 
     int window_count;
     struct window **window_list = window_manager_find_application_windows(&g_window_manager, application, &window_count);
@@ -587,6 +593,8 @@ static EVENT_HANDLER(WINDOW_CREATED)
             sid = space_manager_cursor_space();
         }
 
+        if (virtual_space_is_virtual(sid)) window->vsid = sid;
+
         struct view *view = space_manager_tile_window_on_space(&g_space_manager, window, sid);
         window_manager_add_managed_window(&g_window_manager, window, view);
     }
@@ -660,7 +668,7 @@ static EVENT_HANDLER(WINDOW_FOCUSED)
 
     debug("%s: %s %d\n", __FUNCTION__, window->application->name, window->id);
 
-    if (g_space_manager.skip_window_focus_animation) {
+    if (g_space_manager.skip_window_focus_animation && !g_virtual_space_manager.enabled) {
         uint64_t sid = window_space(window->id);
         if (sid && !space_is_visible(sid)) {
             SLSSpaceSetFrontPSN(g_connection, sid, window->application->psn);
@@ -698,6 +706,7 @@ static EVENT_HANDLER(WINDOW_MOVED)
     event_signal_push(SIGNAL_WINDOW_MOVED, window);
     bool windowed_fullscreen = CGRectEqualToRect(window->windowed_frame, window->frame);
     window->frame.origin = new_origin;
+    virtual_space_window_did_move(window);
 
     if (!windowed_fullscreen) {
         window_clear_flag(window, WINDOW_WINDOWED);
@@ -881,6 +890,7 @@ static EVENT_HANDLER(WINDOW_DEMINIMIZED)
     }
 
     window_clear_flag(window, WINDOW_MINIMIZE);
+    virtual_space_window_did_deminimize(window);
 
     if (window_ax_can_move(window)) {
         window_set_flag(window, WINDOW_MOVABLE);
@@ -970,6 +980,11 @@ static EVENT_HANDLER(SLS_SPACE_CREATED)
     uint64_t sid = (uint64_t)(intptr_t) context;
     int type = SLSSpaceGetType(g_connection, sid);
 
+    if (g_virtual_space_manager.enabled && type == 0) {
+        debug("%s: %lld, ignored (virtual_spaces on)\n", __FUNCTION__, sid);
+        return;
+    }
+
     if (type == 0 || type == 4) {
         debug("%s: %lld, %d\n", __FUNCTION__, sid, type);
         space_manager_find_view(&g_space_manager, sid);
@@ -987,7 +1002,7 @@ static EVENT_HANDLER(SLS_SPACE_DESTROYED)
         table_remove(&g_space_manager.view, &sid);
         view_destroy(view);
         free(view);
-        event_signal_push(SIGNAL_SPACE_DESTROYED, context);
+        if (!g_virtual_space_manager.enabled) event_signal_push(SIGNAL_SPACE_DESTROYED, context);
     }
 }
 
@@ -1094,6 +1109,7 @@ static EVENT_HANDLER(DISPLAY_REMOVED)
     uint32_t did = (uint32_t)(intptr_t) context;
     debug("%s: %d\n", __FUNCTION__, did);
     display_manager_remove_label_for_display(&g_display_manager, did);
+    virtual_space_displays_changed();
     window_manager_handle_display_add_and_remove(&g_space_manager, &g_window_manager, display_manager_main_display_id());
     event_signal_push(SIGNAL_DISPLAY_REMOVED, context);
 }
@@ -1103,6 +1119,7 @@ static EVENT_HANDLER(DISPLAY_MOVED)
     uint32_t did = (uint32_t)(intptr_t) context;
     debug("%s: %d\n", __FUNCTION__, did);
     space_manager_mark_spaces_invalid(&g_space_manager);
+    virtual_space_rehide_all();
     event_signal_push(SIGNAL_DISPLAY_MOVED, context);
 }
 
@@ -1111,6 +1128,7 @@ static EVENT_HANDLER(DISPLAY_RESIZED)
     uint32_t did = (uint32_t)(intptr_t) context;
     debug("%s: %d\n", __FUNCTION__, did);
     space_manager_mark_spaces_invalid_for_display(&g_space_manager, did);
+    virtual_space_rehide_all();
     event_signal_push(SIGNAL_DISPLAY_RESIZED, context);
 }
 
@@ -1610,6 +1628,16 @@ static EVENT_HANDLER(SYSTEM_WOKE)
 
     event_signal_push(SIGNAL_SYSTEM_WOKE, NULL);
 }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+static EVENT_HANDLER(VIRTUAL_SPACE_EXIT)
+{
+    int sig = (int)(intptr_t) context;
+    debug("%s: %d\n", __FUNCTION__, sig);
+    virtual_space_handle_exit(sig);
+}
+#pragma clang diagnostic pop
 
 static EVENT_HANDLER(DAEMON_MESSAGE)
 {

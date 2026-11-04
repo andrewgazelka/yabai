@@ -120,8 +120,8 @@ void window_manager_apply_rule_effects_to_window(struct space_manager *sm, struc
 {
     if (effects->sid || effects->did) {
         if (!window_is_fullscreen(window) && !space_is_fullscreen(window_space(window->id))) {
-            uint64_t sid = effects->sid ? effects->sid : display_space_id(effects->did);
-            window_manager_send_window_to_space(sm, wm, window, sid, true);
+            uint64_t sid = effects->sid ? virtual_space_translate(effects->sid) : display_space_id(effects->did);
+            if (sid) window_manager_send_window_to_space(sm, wm, window, sid, true);
             if (rule_effects_check_flag(effects, RULE_FOLLOW_SPACE) || effects->fullscreen == RULE_PROP_ON) {
                 space_manager_focus_space(sid);
             }
@@ -414,6 +414,11 @@ enum window_op_error window_manager_resize_window_relative(struct window_manager
 
 void window_manager_move_window(struct window *window, float x, float y)
 {
+    if (virtual_space_window_is_hidden(window)) {
+        if (window->vs_has_frame) virtual_space_save_requested_frame(window, x, y, window->vs_size.width, window->vs_size.height);
+        return;
+    }
+
     CGPoint position = CGPointMake(x, y);
     CFTypeRef position_ref = AXValueCreate(kAXValueTypeCGPoint, (void *) &position);
     if (!position_ref) return;
@@ -424,6 +429,11 @@ void window_manager_move_window(struct window *window, float x, float y)
 
 void window_manager_resize_window(struct window *window, float width, float height)
 {
+    if (virtual_space_window_is_hidden(window)) {
+        if (window->vs_has_frame) window->vs_size = CGSizeMake(width, height);
+        return;
+    }
+
     CGSize size = CGSizeMake(width, height);
     CFTypeRef size_ref = AXValueCreate(kAXValueTypeCGSize, (void *) &size);
     if (!size_ref) return;
@@ -706,6 +716,21 @@ void window_manager_animate_window_list(struct window_capture *window_list, int 
 {
     TIME_FUNCTION;
 
+    //
+    // NOTE: Windows of a hidden virtual space stay in their corner; their view is laid out again
+    // when the space is shown.
+    //
+    if (g_virtual_space_manager.enabled) {
+        int visible_count = 0;
+        struct window_capture *visible_list = ts_alloc_list(struct window_capture, window_count > 0 ? window_count : 1);
+        for (int i = 0; i < window_count; ++i) {
+            if (!window_list[i].window->vs_hidden) visible_list[visible_count++] = window_list[i];
+        }
+        if (!visible_count) return;
+        window_list = visible_list;
+        window_count = visible_count;
+    }
+
     if (g_window_manager.window_animation_duration) {
         window_manager_animate_window_list_async(window_list, window_count);
     } else {
@@ -721,6 +746,11 @@ void window_manager_animate_window(struct window_capture capture)
 {
     TIME_FUNCTION;
 
+    if (virtual_space_window_is_hidden(capture.window)) {
+        window_manager_set_window_frame(capture.window, capture.x, capture.y, capture.w, capture.h);
+        return;
+    }
+
     if (g_window_manager.window_animation_duration) {
         window_manager_animate_window_list_async(&capture, 1);
     } else {
@@ -731,6 +761,18 @@ void window_manager_animate_window(struct window_capture capture)
 }
 
 void window_manager_set_window_frame(struct window *window, float x, float y, float width, float height)
+{
+    if (virtual_space_window_is_hidden(window)) {
+        if (!window_manager_find_managed_window(&g_window_manager, window)) {
+            virtual_space_save_requested_frame(window, x, y, width, height);
+        }
+        return;
+    }
+
+    window_manager_set_window_frame_raw(window, x, y, width, height);
+}
+
+void window_manager_set_window_frame_raw(struct window *window, float x, float y, float width, float height)
 {
     //
     // NOTE(asmvik): Attempting to check the window frame cache to prevent unnecessary movement and resize calls to the AX API
@@ -959,7 +1001,8 @@ struct window *window_manager_find_window_at_point_filtering_window(struct windo
         if (g_connection == window_cid) SLSFindWindowAndOwner(g_connection, window_id, -1, 0, &point, &window_point, &window_id, &window_cid);
     }
 
-    return window_manager_find_window(wm, window_id);
+    struct window *window = window_manager_find_window(wm, window_id);
+    return window && virtual_space_window_is_hidden(window) ? NULL : window;
 }
 
 struct window *window_manager_find_window_at_point(struct window_manager *wm, CGPoint point)
@@ -976,7 +1019,8 @@ struct window *window_manager_find_window_at_point(struct window_manager *wm, CG
         if (g_connection == window_cid) SLSFindWindowAndOwner(g_connection, window_id, -1, 0, &point, &window_point, &window_id, &window_cid);
     }
 
-    return window_manager_find_window(wm, window_id);
+    struct window *window = window_manager_find_window(wm, window_id);
+    return window && virtual_space_window_is_hidden(window) ? NULL : window;
 }
 
 struct window *window_manager_find_window_below_cursor(struct window_manager *wm)
@@ -2105,6 +2149,7 @@ void window_manager_send_window_to_space(struct space_manager *sm, struct window
         if (next) {
             window_manager_focus_window_with_raise(&next->application->psn, next->id, next->ref);
         } else {
+            if (g_virtual_space_manager.enabled) virtual_space_suppress_finder_focus();
             _SLPSSetFrontProcessWithOptions(&g_process_manager.finder_psn, 0, kCPSNoWindows);
         }
     }
@@ -2117,7 +2162,7 @@ void window_manager_send_window_to_space(struct space_manager *sm, struct window
     }
 
     space_manager_move_window_to_space(dst_sid, window);
-    SLSSpaceSetFrontPSN(g_connection, dst_sid, window->application->psn);
+    if (!virtual_space_is_virtual(dst_sid)) SLSSpaceSetFrontPSN(g_connection, dst_sid, window->application->psn);
 
     if (window_manager_should_manage_window(window)) {
         struct view *view = space_manager_tile_window_on_space(sm, window, dst_sid);
@@ -2301,7 +2346,7 @@ void window_manager_toggle_window_native_fullscreen(struct window *window)
 {
     TIME_FUNCTION;
 
-    uint32_t sid = window_space(window->id);
+    uint64_t sid = window_space(window->id);
 
     //
     // NOTE(asmvik): The window must become the focused window
@@ -2628,6 +2673,12 @@ static void window_manager_check_for_windows_on_space(struct window_manager *wm,
 
 void window_manager_validate_and_check_for_windows_on_space(struct space_manager *sm, struct window_manager *wm, uint64_t sid)
 {
+    //
+    // NOTE: With virtual spaces on, the native user spaces have no views of their own; their
+    // windows belong to the virtual spaces.
+    //
+    if (g_virtual_space_manager.enabled && !virtual_space_is_virtual(sid) && space_is_user(sid)) return;
+
     struct view *view = space_manager_find_view(sm, sid);
     if (view->layout == VIEW_FLOAT) return;
 

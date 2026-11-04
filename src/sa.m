@@ -267,6 +267,15 @@ out:
     return result;
 }
 
+bool scripting_addition_is_loaded(void)
+{
+    uint32_t attrib = 0;
+    char version[SA_SOCKET_BUFF_LEN] = {0};
+
+    if (!scripting_addition_request_handshake(version, &attrib)) return false;
+    return string_equals(version, OSAX_VERSION);
+}
+
 static uint32_t scripting_addition_required_attrib(void)
 {
     NSOperatingSystemVersion os_version = [[NSProcessInfo processInfo] operatingSystemVersion];

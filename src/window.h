@@ -103,6 +103,11 @@ struct window
     float opacity;
     int layer;
     char *scratchpad;
+    uint64_t vsid;
+    bool vs_hidden;
+    bool vs_has_frame;
+    CGPoint vs_origin;
+    CGSize vs_size;
 };
 
 enum window_flag
@@ -135,8 +140,11 @@ static inline void window_set_rule_flag(struct window *w, enum window_rule_flag 
 
 CFStringRef window_display_uuid(uint32_t wid);
 uint32_t window_display_id(uint32_t wid);
+uint32_t window_display_id_real(uint32_t wid);
 uint64_t window_space(uint32_t wid);
+uint64_t window_space_real(uint32_t wid);
 uint64_t *window_space_list(uint32_t wid, int *count);
+uint64_t *window_space_list_real(uint32_t wid, int *count);
 void window_unknown_serialize(FILE *rsp, uint32_t wid, uint64_t flags);
 void window_serialize(FILE *rsp, struct window *window, uint64_t flags);
 char *window_property_title_ts(uint32_t wid);

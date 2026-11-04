@@ -482,6 +482,8 @@ void display_manager_focus_display(uint32_t did, uint64_t sid)
 
 enum space_op_error display_manager_focus_space(uint32_t did, uint64_t sid)
 {
+    if (virtual_space_is_virtual(sid)) return virtual_space_focus_on_display(sid, did);
+
     bool is_in_mc = mission_control_is_active();
     if (is_in_mc) return SPACE_OP_ERROR_IN_MISSION_CONTROL;
 

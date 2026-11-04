@@ -1,6 +1,6 @@
 extern int g_connection;
 
-inline uint32_t space_display_id(uint64_t sid)
+uint32_t space_display_id_real(uint64_t sid)
 {
     CFStringRef uuid_string = SLSCopyManagedDisplayForSpace(g_connection, sid);
     if (!uuid_string) return 0;
@@ -14,7 +14,7 @@ inline uint32_t space_display_id(uint64_t sid)
     return id;
 }
 
-uint32_t *space_window_list_for_connection(uint64_t *space_list, int space_count, int cid, int *count, bool include_minimized)
+uint32_t *space_window_list_for_connection_real(uint64_t *space_list, int space_count, int cid, int *count, bool include_minimized)
 {
     uint32_t *window_list = NULL;
     uint64_t set_tags = 0;
@@ -85,22 +85,38 @@ inline uint32_t *space_window_list(uint64_t sid, int *count, bool include_minimi
     return space_window_list_for_connection(&sid, 1, 0, count, include_minimized);
 }
 
-inline  bool space_is_user(uint64_t sid)
+uint32_t space_display_id(uint64_t sid)
 {
+    if (virtual_space_is_virtual(sid)) return virtual_space_display(sid);
+    return space_display_id_real(sid);
+}
+
+uint32_t *space_window_list_for_connection(uint64_t *space_list, int space_count, int cid, int *count, bool include_minimized)
+{
+    if (g_virtual_space_manager.enabled) return virtual_space_window_list(space_list, space_count, cid, count, include_minimized);
+    return space_window_list_for_connection_real(space_list, space_count, cid, count, include_minimized);
+}
+
+bool space_is_user(uint64_t sid)
+{
+    if (virtual_space_is_virtual(sid)) return true;
     return SLSSpaceGetType(g_connection, sid) == 0;
 }
 
-inline bool space_is_fullscreen(uint64_t sid)
+bool space_is_fullscreen(uint64_t sid)
 {
+    if (virtual_space_is_virtual(sid)) return false;
     return SLSSpaceGetType(g_connection, sid) == 4;
 }
 
-inline bool space_is_system(uint64_t sid)
+bool space_is_system(uint64_t sid)
 {
+    if (virtual_space_is_virtual(sid)) return false;
     return SLSSpaceGetType(g_connection, sid) == 2;
 }
 
-inline bool space_is_visible(uint64_t sid)
+bool space_is_visible(uint64_t sid)
 {
-    return sid == display_space_id(space_display_id(sid));
+    if (virtual_space_is_virtual(sid)) return virtual_space_is_visible(sid);
+    return sid == display_space_id_real(space_display_id_real(sid));
 }

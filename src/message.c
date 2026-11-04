@@ -52,6 +52,8 @@ extern bool g_verbose;
 #define COMMAND_CONFIG_MOUSE_DROP_ACTION     "mouse_drop_action"
 #define COMMAND_CONFIG_EXTERNAL_BAR          "external_bar"
 #define COMMAND_CONFIG_SKIP_SPACE_ANIMATION  "skip_window_focus_animation"
+#define COMMAND_CONFIG_VIRTUAL_SPACES        "virtual_spaces"
+#define COMMAND_CONFIG_VIRTUAL_SPACE_COUNT   "virtual_space_count"
 
 #define SELECTOR_CONFIG_SPACE                "--space"
 
@@ -1263,6 +1265,31 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
             } else {
                 daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
             }
+        } else if (token_equals(command, COMMAND_CONFIG_VIRTUAL_SPACES)) {
+            struct token value = get_token(&message);
+            if (!token_is_valid(value)) {
+                fprintf(rsp, "%s\n", bool_str[g_virtual_space_manager.enabled]);
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_OFF)) {
+                virtual_space_disable();
+            } else if (token_equals(value, ARGUMENT_COMMON_VAL_ON)) {
+                if (!virtual_space_enable(g_virtual_space_manager.count)) {
+                    daemon_fail(rsp, "could not turn on virtual spaces: no active display found.\n");
+                }
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.length, value.text, command.length, command.text, domain.length, domain.text);
+            }
+        } else if (token_equals(command, COMMAND_CONFIG_VIRTUAL_SPACE_COUNT)) {
+            struct token_value value = token_to_value(get_token(&message));
+            if (value.type == TOKEN_TYPE_INVALID) {
+                fprintf(rsp, "%d\n", g_virtual_space_manager.enabled ? buf_len(g_virtual_space_manager.spaces) : (g_virtual_space_manager.count ? g_virtual_space_manager.count : VIRTUAL_SPACE_DEFAULT_COUNT));
+            } else if (value.type == TOKEN_TYPE_INT && value.int_value >= 1) {
+                g_virtual_space_manager.count = value.int_value;
+                while (g_virtual_space_manager.enabled && buf_len(g_virtual_space_manager.spaces) < value.int_value) {
+                    if (virtual_space_create(0) != SPACE_OP_ERROR_SUCCESS) break;
+                }
+            } else {
+                daemon_fail(rsp, "unknown value '%.*s' given to command '%.*s' for domain '%.*s'\n", value.token.length, value.token.text, command.length, command.text, domain.length, domain.text);
+            }
         } else if (token_equals(command, COMMAND_CONFIG_SKIP_SPACE_ANIMATION)) {
             struct token value = get_token(&message);
             if (!token_is_valid(value)) {
@@ -1781,7 +1808,9 @@ static void handle_domain_space(FILE *rsp, struct token domain, char *message)
             struct selector selector = parse_space_selector(rsp, &message, acting_sid, false);
             if (selector.did_parse && selector.sid) {
                 enum space_op_error result = space_manager_focus_space(selector.sid);
-                if (result == SPACE_OP_ERROR_SAME_SPACE) {
+                if (result == SPACE_OP_ERROR_MISSING_DST) {
+                    daemon_fail(rsp, "could not locate the virtual space to focus.\n");
+                } else if (result == SPACE_OP_ERROR_SAME_SPACE) {
                     daemon_fail(rsp, "cannot focus an already focused space.\n");
                 } else if (result == SPACE_OP_ERROR_DISPLAY_IS_ANIMATING) {
                     daemon_fail(rsp, "cannot focus space because the display is in the middle of an animation.\n");
@@ -1809,7 +1838,9 @@ static void handle_domain_space(FILE *rsp, struct token domain, char *message)
             struct selector selector = parse_space_selector(rsp, &message, acting_sid, false);
             if (selector.did_parse && selector.sid) {
                 enum space_op_error result = space_manager_move_space_to_space(acting_sid, selector.sid);
-                if (result == SPACE_OP_ERROR_SAME_SPACE) {
+                if (result == SPACE_OP_ERROR_INVALID_TYPE) {
+                    daemon_fail(rsp, "space --move is not supported while virtual_spaces is on.\n");
+                } else if (result == SPACE_OP_ERROR_SAME_SPACE) {
                     daemon_fail(rsp, "cannot move space to itself.\n");
                 } else if (result == SPACE_OP_ERROR_SAME_DISPLAY) {
                     daemon_fail(rsp, "cannot move space across display boundaries. use --display instead.\n");
@@ -1825,7 +1856,9 @@ static void handle_domain_space(FILE *rsp, struct token domain, char *message)
             struct selector selector = parse_space_selector(rsp, &message, acting_sid, false);
             if (selector.did_parse && selector.sid) {
                 enum space_op_error result = space_manager_swap_space_with_space(acting_sid, selector.sid);
-                if (result == SPACE_OP_ERROR_SAME_SPACE) {
+                if (result == SPACE_OP_ERROR_INVALID_TYPE) {
+                    daemon_fail(rsp, "space --swap is not supported while virtual_spaces is on.\n");
+                } else if (result == SPACE_OP_ERROR_SAME_SPACE) {
                     daemon_fail(rsp, "cannot swap space with itself.\n");
                 } else if (result == SPACE_OP_ERROR_DISPLAY_IS_ANIMATING) {
                     daemon_fail(rsp, "cannot swap space because the display is in the middle of an animation.\n");
@@ -1839,7 +1872,9 @@ static void handle_domain_space(FILE *rsp, struct token domain, char *message)
             struct selector selector = parse_display_selector(rsp, &message, display_manager_active_display_id(), false);
             if (selector.did_parse && selector.did) {
                 enum space_op_error result = space_manager_move_space_to_display(&g_space_manager, acting_sid, selector.did);
-                if (result == SPACE_OP_ERROR_MISSING_SRC) {
+                if (result == SPACE_OP_ERROR_INVALID_TYPE) {
+                    daemon_fail(rsp, "space --display is not supported while virtual_spaces is on.\n");
+                } else if (result == SPACE_OP_ERROR_MISSING_SRC) {
                     daemon_fail(rsp, "could not locate the space to act on.\n");
                 } else if (result == SPACE_OP_ERROR_MISSING_DST) {
                     daemon_fail(rsp, "could not locate the active space of the given display.\n");
@@ -1873,6 +1908,8 @@ static void handle_domain_space(FILE *rsp, struct token domain, char *message)
                 daemon_fail(rsp, "cannot create space because the display is in the middle of an animation.\n");
             } else if (result == SPACE_OP_ERROR_IN_MISSION_CONTROL) {
                 daemon_fail(rsp, "cannot create space because mission-control is active.\n");
+            } else if (result == SPACE_OP_ERROR_INVALID_SRC) {
+                daemon_fail(rsp, "cannot create space: the virtual space id range is used up.\n");
             } else if (result == SPACE_OP_ERROR_SCRIPTING_ADDITION) {
                 daemon_fail(rsp, "cannot create space due to an error with the scripting-addition.\n");
             }
@@ -1891,7 +1928,11 @@ static void handle_domain_space(FILE *rsp, struct token domain, char *message)
             if (result == SPACE_OP_ERROR_MISSING_SRC) {
                 daemon_fail(rsp, "could not locate the space to act on.\n");
             } else if (result == SPACE_OP_ERROR_INVALID_SRC) {
-                daemon_fail(rsp, "acting space is the last user-space on the source display and cannot be destroyed.\n");
+                if (g_virtual_space_manager.enabled) {
+                    daemon_fail(rsp, "cannot destroy space: each display needs a virtual space to show.\n");
+                } else {
+                    daemon_fail(rsp, "acting space is the last user-space on the source display and cannot be destroyed.\n");
+                }
             } else if (result == SPACE_OP_ERROR_INVALID_TYPE) {
                 daemon_fail(rsp, "cannot destroy a macOS fullscreen space.\n");
             } else if (result == SPACE_OP_ERROR_DISPLAY_IS_ANIMATING) {

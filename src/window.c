@@ -41,6 +41,19 @@ CFStringRef window_display_uuid(uint32_t wid)
 
 uint32_t window_display_id(uint32_t wid)
 {
+    if (g_virtual_space_manager.enabled) {
+        struct window *window = window_manager_find_window(&g_window_manager, wid);
+        if (window && window->vs_hidden) {
+            uint32_t did = virtual_space_display(window->vsid);
+            if (did) return did;
+        }
+    }
+
+    return window_display_id_real(wid);
+}
+
+uint32_t window_display_id_real(uint32_t wid)
+{
     CFStringRef uuid_string = window_display_uuid(wid);
     if (!uuid_string) return 0;
 
@@ -66,6 +79,12 @@ static uint64_t window_display_space(uint32_t wid)
 
 uint64_t window_space(uint32_t wid)
 {
+    if (g_virtual_space_manager.enabled) return virtual_space_window_space(wid);
+    return window_space_real(wid);
+}
+
+uint64_t window_space_real(uint32_t wid)
+{
     uint64_t sid = 0;
 
     CFArrayRef window_list_ref = cfarray_of_cfnumbers(&wid, sizeof(uint32_t), 1, kCFNumberSInt32Type);
@@ -87,6 +106,21 @@ err:
 }
 
 uint64_t *window_space_list(uint32_t wid, int *count)
+{
+    if (g_virtual_space_manager.enabled) {
+        uint64_t sid = virtual_space_window_space(wid);
+        if (virtual_space_is_virtual(sid)) {
+            uint64_t *space_list = ts_alloc_list(uint64_t, 1);
+            space_list[0] = sid;
+            *count = 1;
+            return space_list;
+        }
+    }
+
+    return window_space_list_real(wid, count);
+}
+
+uint64_t *window_space_list_real(uint32_t wid, int *count)
 {
     uint64_t *space_list = NULL;
     CFArrayRef window_list_ref = cfarray_of_cfnumbers(&wid, sizeof(uint32_t), 1, kCFNumberSInt32Type);
