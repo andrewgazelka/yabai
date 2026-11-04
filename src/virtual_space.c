@@ -26,6 +26,43 @@ static struct virtual_display *virtual_space_find_display(uint32_t did)
     return NULL;
 }
 
+//
+// NOTE: The native space each display keeps. Its windows are the windows of the virtual spaces;
+// while the display shows another native space (a fullscreen space, or an extra space the user
+// swiped to) the virtual views must not be validated against that space's window list.
+//
+static uint64_t virtual_space_home_for_display(uint32_t did)
+{
+    struct virtual_display *vd = virtual_space_find_display(did);
+    if (vd && vd->home_sid) return vd->home_sid;
+    return display_space_id_real(did);
+}
+
+static uint64_t virtual_space_pick_home(uint32_t did)
+{
+    uint64_t sid = display_space_id_real(did);
+    if (sid && space_is_user(sid)) return sid;
+
+    int count = 0;
+    uint64_t *space_list = display_space_list_real(did, &count);
+    for (int i = 0; i < count; ++i) {
+        if (space_is_user(space_list[i])) return space_list[i];
+    }
+
+    return sid;
+}
+
+bool virtual_space_can_validate(uint64_t sid)
+{
+    struct virtual_space *vs = virtual_space_find(sid);
+    if (!vs) return false;
+
+    struct virtual_display *vd = virtual_space_find_display(vs->did);
+    if (!vd) return false;
+
+    return !vd->home_sid || display_space_id_real(vs->did) == vd->home_sid;
+}
+
 static uint32_t virtual_space_current_display(void)
 {
     uint32_t did = g_display_manager.current_display_id;
@@ -186,7 +223,7 @@ uint32_t *virtual_space_window_list(uint64_t *space_list, int space_count, int c
 
         if (virtual_space_is_virtual(real_sid)) {
             struct virtual_space *vs = virtual_space_find(real_sid);
-            real_sid = vs ? display_space_id_real(vs->did) : 0;
+            real_sid = vs ? virtual_space_home_for_display(vs->did) : 0;
         }
 
         if (!real_sid) continue;
@@ -420,20 +457,49 @@ static void virtual_space_focus_nothing(void)
     _SLPSSetFrontProcessWithOptions(&g_process_manager.finder_psn, 0, kCPSNoWindows);
 }
 
-bool virtual_space_should_ignore_focus(struct window *window)
+static void virtual_space_focus_window_in(struct virtual_space *vs);
+
+void virtual_space_note_focus_lost(void)
 {
     struct virtual_space_manager *vsm = &g_virtual_space_manager;
-    if (!vsm->enabled || !vsm->suppress_pid) return false;
+    if (!vsm->enabled) return;
 
-    if (read_os_timer() > vsm->suppress_until) {
-        vsm->suppress_pid = 0;
-        return false;
-    }
+    vsm->leave_until = read_os_timer() + read_os_freq() / 2;
+}
 
-    if (window->application->pid != vsm->suppress_pid) return false;
+//
+// NOTE: Focus that lands on a window of a hidden virtual space normally shows that space. Two
+// cases do not: Finder activated by us because a space was empty, and macOS picking the next key
+// window by itself right after a window was closed, minimized, or its app hidden or quit. In the
+// second case focus goes back to the space the display shows, unless the user cmd-tabbed.
+//
+bool virtual_space_should_ignore_focus(struct window *window, bool explicit_switch)
+{
+    struct virtual_space_manager *vsm = &g_virtual_space_manager;
+    if (!vsm->enabled) return false;
 
     uint64_t sid = virtual_space_window_space(window->id);
-    return virtual_space_is_virtual(sid) && !virtual_space_is_visible(sid);
+    if (!virtual_space_is_virtual(sid) || virtual_space_is_visible(sid)) return false;
+
+    uint64_t now = read_os_timer();
+
+    if (vsm->suppress_pid) {
+        if (now > vsm->suppress_until) {
+            vsm->suppress_pid = 0;
+        } else if (window->application->pid == vsm->suppress_pid) {
+            return true;
+        }
+    }
+
+    if (!explicit_switch && vsm->leave_until && now <= vsm->leave_until) {
+        vsm->leave_until = 0;
+
+        struct virtual_space *vs = virtual_space_find(virtual_space_active_for_display(virtual_space_current_display()));
+        if (vs) virtual_space_focus_window_in(vs);
+        return true;
+    }
+
+    return false;
 }
 
 static void virtual_space_focus_window_in(struct virtual_space *vs)
@@ -655,7 +721,25 @@ void virtual_space_window_did_receive_focus(struct window *window)
 void virtual_space_window_did_move(struct window *window)
 {
     if (!g_virtual_space_manager.enabled) return;
-    if (window->vs_hidden || !window->vsid) return;
+    if (!window->vsid) return;
+
+    if (window->vs_hidden) {
+        //
+        // NOTE: The app moved a hidden window back on screen (restoring its frame, re-showing a
+        // panel). Put it back in the corner; the frame it asked for is what it gets when shown.
+        //
+        uint32_t did = virtual_space_display(window->vsid);
+        if (!did) return;
+
+        CGRect frame = window_ax_frame(window);
+        CGRect overlap = CGRectIntersection(frame, CGDisplayBounds(did));
+        if (CGRectIsNull(overlap) || overlap.size.width < 40 || overlap.size.height < 40) return;
+
+        virtual_space_save_frame(window, frame);
+        virtual_space_hide_window(window, did);
+        return;
+    }
+
     if (window_manager_find_managed_window(&g_window_manager, window)) return;
 
     struct virtual_space *vs = virtual_space_find(window->vsid);
@@ -678,7 +762,11 @@ void virtual_space_window_did_deminimize(struct window *window)
     if (!sid) sid = virtual_space_active_for_display(virtual_space_current_display());
 
     window->vsid = sid;
-    window->vs_hidden = false;
+    if (window->vs_hidden && did) {
+        virtual_space_unhide_window(window, did, true);
+    } else {
+        window->vs_hidden = false;
+    }
 }
 
 void virtual_space_application_did_unhide(struct application *application)
@@ -687,7 +775,8 @@ void virtual_space_application_did_unhide(struct application *application)
 
     table_for (struct window *window, g_window_manager.window, {
         if (window->application == application && window->vsid && !virtual_space_is_visible(window->vsid)) {
-            virtual_space_hide_window(window, virtual_space_display(window->vsid));
+            uint32_t did = virtual_space_display(window->vsid);
+            if (did) virtual_space_hide_window(window, did);
         }
     })
 }
@@ -746,7 +835,7 @@ void virtual_space_displays_changed(void)
             pick = buf_len(vsm->spaces) - 1;
         }
 
-        buf_push(vsm->displays, ((struct virtual_display) { .did = did, .sid = 0 }));
+        buf_push(vsm->displays, ((struct virtual_display) { .did = did, .sid = 0, .home_sid = virtual_space_pick_home(did) }));
         virtual_space_show_on_display(&vsm->spaces[pick], did);
     }
 
@@ -958,7 +1047,7 @@ bool virtual_space_enable(int count)
         uint64_t shown_sid = current_is_user ? current_sid[i] : first_user;
         int shown_index = shown_sid ? space_manager_mission_control_index(shown_sid) : 0;
         uint64_t active = (shown_index >= 1 && shown_index <= count) ? vsm->spaces[shown_index-1].sid : 0;
-        buf_push(vsm->displays, ((struct virtual_display) { .did = did, .sid = active }));
+        buf_push(vsm->displays, ((struct virtual_display) { .did = did, .sid = active, .home_sid = home_sid[i] ? home_sid[i] : current_sid[i] }));
     }
 
     for (int i = 0; i < buf_len(vsm->displays); ++i) {
@@ -968,6 +1057,10 @@ bool virtual_space_enable(int count)
             bool taken = false;
             for (int k = 0; k < buf_len(vsm->displays); ++k) {
                 if (vsm->displays[k].sid == vsm->spaces[j].sid) { taken = true; break; }
+            }
+
+            for (int k = 0; k < native_count && !taken; ++k) {
+                if (native_vsid[k] == vsm->spaces[j].sid && native_did[k] != vsm->displays[i].did) taken = true;
             }
 
             if (!taken) {
@@ -1048,7 +1141,8 @@ bool virtual_space_enable(int count)
         if (virtual_space_is_visible(window->vsid)) {
             virtual_space_recover_stranded_window(window);
         } else {
-            virtual_space_hide_window(window, virtual_space_display(window->vsid));
+            uint32_t did = virtual_space_display(window->vsid);
+            if (did) virtual_space_hide_window(window, did);
         }
     })
 
@@ -1062,6 +1156,12 @@ bool virtual_space_enable(int count)
     //
 
     if (sa) {
+        for (int i = 0; i < display_count; ++i) {
+            for (int tries = 0; tries < 30 && display_manager_display_is_animating(display_list[i]); ++tries) {
+                usleep(100000);
+            }
+        }
+
         int destroyed = 0;
         for (int i = 0; i < native_count; ++i) {
             bool is_home = false;
@@ -1074,7 +1174,7 @@ bool virtual_space_enable(int count)
         }
         warn("yabai: virtual_spaces: destroyed %d extra native space(s)\n", destroyed);
     } else if (extra_count) {
-        warn("yabai: virtual_spaces: %d extra native space(s) left in place; load the scripting addition to remove them\n", extra_count);
+        warn("yabai: virtual_spaces: %d extra native space(s) left in place (load the scripting addition to remove them); windows that stay on them are not part of any virtual space\n", extra_count);
     }
 
     free(native_sid);
@@ -1111,13 +1211,10 @@ void virtual_space_disable(void)
         free(view);
     }
 
-    for (int i = 0; i < buf_len(g_space_manager.labels);) {
-        if (virtual_space_is_virtual(g_space_manager.labels[i].sid)) {
-            free(g_space_manager.labels[i].label);
-            vs_buf_remove(g_space_manager.labels, i);
-        } else {
-            ++i;
-        }
+    int label_count = buf_len(g_space_manager.labels);
+    int label_index[label_count > 0 ? label_count : 1];
+    for (int i = 0; i < label_count; ++i) {
+        label_index[i] = virtual_space_index(g_space_manager.labels[i].sid);
     }
 
     table_for (struct window *window, g_window_manager.window, {
@@ -1130,6 +1227,21 @@ void virtual_space_disable(void)
     vsm->spaces = NULL;
     vsm->displays = NULL;
     vsm->enabled = false;
+
+    //
+    // NOTE: Labels follow the index back to the native space with the same mission-control index.
+    //
+    for (int i = 0, j = 0; i < label_count; ++i) {
+        if (!virtual_space_is_virtual(g_space_manager.labels[j].sid)) { ++j; continue; }
+
+        uint64_t native_sid = label_index[i] ? space_manager_mission_control_space(label_index[i]) : 0;
+        if (native_sid && space_is_user(native_sid) && !space_manager_get_label_for_space(&g_space_manager, native_sid)) {
+            g_space_manager.labels[j++].sid = native_sid;
+        } else {
+            free(g_space_manager.labels[j].label);
+            vs_buf_remove(g_space_manager.labels, j);
+        }
+    }
 
     virtual_space_uninstall_signal_handlers();
 

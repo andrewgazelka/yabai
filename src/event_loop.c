@@ -36,7 +36,9 @@ static void update_window_notifications(void)
 static void window_did_receive_focus(struct window_manager *wm, struct mouse_state *ms, struct window *window)
 {
     if (g_virtual_space_manager.enabled) {
-        if (virtual_space_should_ignore_focus(window)) return;
+        uint64_t last_cmd_tab_time = __atomic_load_n(&__last_cmd_tab_time, __ATOMIC_RELAXED);
+        bool explicit_switch = ((float) read_os_timer() - last_cmd_tab_time) * (1000.0f / (float)read_os_freq()) < 1500.0f;
+        if (virtual_space_should_ignore_focus(window, explicit_switch)) return;
         virtual_space_window_did_receive_focus(window);
     }
 
@@ -256,6 +258,7 @@ static EVENT_HANDLER(APPLICATION_TERMINATED)
 {
     struct process *process = context;
     struct application *application = window_manager_find_application(&g_window_manager, process->pid);
+    if (application && application->pid == g_process_manager.front_pid) virtual_space_note_focus_lost();
 
     if (!application) {
         debug("%s: %s (%d) (not observed)\n", __FUNCTION__, process->name, process->pid);
@@ -500,6 +503,7 @@ static EVENT_HANDLER(APPLICATION_HIDDEN)
 
     debug("%s: %s\n", __FUNCTION__, application->name);
     application->is_hidden = true;
+    virtual_space_note_focus_lost();
 
     int window_count;
     struct window **window_list = window_manager_find_application_windows(&g_window_manager, application, &window_count);
@@ -617,6 +621,7 @@ static EVENT_HANDLER(WINDOW_DESTROYED)
     }
 
     debug("%s: %s %d\n", __FUNCTION__, window->application ? window->application->name : "<unknown>", window->id);
+    if (window->id == g_window_manager.focused_window_id) virtual_space_note_focus_lost();
 
     struct view *view = window_manager_find_managed_window(&g_window_manager, window);
     if (view) {
@@ -846,6 +851,7 @@ static EVENT_HANDLER(WINDOW_MINIMIZED)
 
     debug("%s: %s %d\n", __FUNCTION__, window->application->name, window->id);
     window_set_flag(window, WINDOW_MINIMIZE);
+    virtual_space_note_focus_lost();
 
     if (window_ax_can_move(window)) {
         window_set_flag(window, WINDOW_MOVABLE);

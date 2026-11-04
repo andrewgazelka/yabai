@@ -1282,7 +1282,7 @@ static void handle_domain_config(FILE *rsp, struct token domain, char *message)
             struct token_value value = token_to_value(get_token(&message));
             if (value.type == TOKEN_TYPE_INVALID) {
                 fprintf(rsp, "%d\n", g_virtual_space_manager.enabled ? buf_len(g_virtual_space_manager.spaces) : (g_virtual_space_manager.count ? g_virtual_space_manager.count : VIRTUAL_SPACE_DEFAULT_COUNT));
-            } else if (value.type == TOKEN_TYPE_INT && value.int_value >= 1) {
+            } else if (value.type == TOKEN_TYPE_INT && value.int_value >= 1 && value.int_value <= VIRTUAL_SPACE_MAX_COUNT) {
                 g_virtual_space_manager.count = value.int_value;
                 while (g_virtual_space_manager.enabled && buf_len(g_virtual_space_manager.spaces) < value.int_value) {
                     if (virtual_space_create(0) != SPACE_OP_ERROR_SUCCESS) break;

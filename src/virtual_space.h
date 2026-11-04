@@ -20,6 +20,7 @@
 #define VIRTUAL_SPACE_SID_BASE      0x7a000000ULL
 #define VIRTUAL_SPACE_SID_LIMIT     0x7b000000ULL
 #define VIRTUAL_SPACE_DEFAULT_COUNT 10
+#define VIRTUAL_SPACE_MAX_COUNT     100
 
 struct virtual_space
 {
@@ -32,6 +33,7 @@ struct virtual_display
 {
     uint32_t did;
     uint64_t sid;
+    uint64_t home_sid;
 };
 
 struct virtual_space_manager
@@ -43,6 +45,7 @@ struct virtual_space_manager
     struct virtual_display *displays;
     pid_t suppress_pid;
     uint64_t suppress_until;
+    uint64_t leave_until;
     dispatch_source_t signal_source[3];
 };
 
@@ -78,7 +81,9 @@ enum space_op_error virtual_space_create(uint32_t did);
 enum space_op_error virtual_space_destroy(uint64_t sid);
 void virtual_space_move_window(struct window *window, uint64_t sid);
 void virtual_space_window_did_receive_focus(struct window *window);
-bool virtual_space_should_ignore_focus(struct window *window);
+bool virtual_space_should_ignore_focus(struct window *window, bool explicit_switch);
+void virtual_space_note_focus_lost(void);
+bool virtual_space_can_validate(uint64_t sid);
 void virtual_space_suppress_finder_focus(void);
 void virtual_space_window_did_move(struct window *window);
 void virtual_space_window_did_deminimize(struct window *window);

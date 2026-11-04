@@ -2678,6 +2678,7 @@ void window_manager_validate_and_check_for_windows_on_space(struct space_manager
     // windows belong to the virtual spaces.
     //
     if (g_virtual_space_manager.enabled && !virtual_space_is_virtual(sid) && space_is_user(sid)) return;
+    if (virtual_space_is_virtual(sid) && !virtual_space_can_validate(sid)) return;
 
     struct view *view = space_manager_find_view(sm, sid);
     if (view->layout == VIEW_FLOAT) return;
