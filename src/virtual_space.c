@@ -31,13 +31,6 @@ static struct virtual_display *virtual_space_find_display(uint32_t did)
 // while the display shows another native space (a fullscreen space, or an extra space the user
 // swiped to) the virtual views must not be validated against that space's window list.
 //
-static uint64_t virtual_space_home_for_display(uint32_t did)
-{
-    struct virtual_display *vd = virtual_space_find_display(did);
-    if (vd && vd->home_sid) return vd->home_sid;
-    return display_space_id_real(did);
-}
-
 static uint64_t virtual_space_pick_home(uint32_t did)
 {
     uint64_t sid = display_space_id_real(did);
@@ -52,6 +45,22 @@ static uint64_t virtual_space_pick_home(uint32_t did)
     return sid;
 }
 
+static uint64_t virtual_space_home_for_display(uint32_t did)
+{
+    struct virtual_display *vd = virtual_space_find_display(did);
+    if (!vd) return display_space_id_real(did);
+
+    // WindowServer can replace a surviving display's native space after a monitor change.
+    // Keep a home that still belongs to this display, including while native fullscreen is shown.
+    if (vd->home_sid && space_display_id_real(vd->home_sid) == did) return vd->home_sid;
+
+    uint64_t home_sid = virtual_space_pick_home(did);
+    // Display/space metadata can be temporarily unavailable during reconfiguration.
+    // Retain the previous home until a user space is available, and retry on the next lookup.
+    if (home_sid && space_is_user(home_sid)) vd->home_sid = home_sid;
+    return vd->home_sid;
+}
+
 bool virtual_space_can_validate(uint64_t sid)
 {
     struct virtual_space *vs = virtual_space_find(sid);
@@ -60,7 +69,8 @@ bool virtual_space_can_validate(uint64_t sid)
     struct virtual_display *vd = virtual_space_find_display(vs->did);
     if (!vd) return false;
 
-    return !vd->home_sid || display_space_id_real(vs->did) == vd->home_sid;
+    uint64_t home_sid = virtual_space_home_for_display(vs->did);
+    return !home_sid || display_space_id_real(vs->did) == home_sid;
 }
 
 static uint32_t virtual_space_current_display(void)
@@ -819,7 +829,10 @@ void virtual_space_displays_changed(void)
 
     for (int i = 0; i < display_count; ++i) {
         uint32_t did = display_list[i];
-        if (virtual_space_find_display(did)) continue;
+        if (virtual_space_find_display(did)) {
+            virtual_space_home_for_display(did);
+            continue;
+        }
 
         int pick = -1;
         for (int j = 0; j < buf_len(vsm->spaces) && pick == -1; ++j) {
